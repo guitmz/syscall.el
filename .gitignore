@@ -1,0 +1,12 @@
+# Emacs build and editor state
+*.elc
+*.eln
+*.el~
+*~
+.#*
+\#*\#
+auto-save-list/
+
+# Local caches from make live and manual testing
+live-cache/
+.DS_Store
