@@ -4,6 +4,8 @@ Linux syscall tables right inside Emacs, and they work offline.
 
 Look up any syscall on several architectures and ABIs, for almost every kernel release. You get the number, the signature, which register holds each argument, and when it showed up or went away. The data comes from [api.syscall.sh](https://api.syscall.sh/docs) and gets cached the first time you need it, so after that you can work on a plane.
 
+![The detail buffer for openat on x64, with its number, signature, registers, notes and its number on other architectures](https://syscall.sh/emacs/detail.webp)
+
 ## What it does
 
 - **Look up syscalls.** Find one by name or by number, decimal or hex. The name at point is the default, so `SYS_read` or `__NR_read` in your code just works.
@@ -13,6 +15,12 @@ Look up any syscall on several architectures and ABIs, for almost every kernel r
 - **Check conventions.** See the registers and trap instruction for every architecture, plus ABI quirks like `syscall` clobbering `rcx` and `r11` on x64.
 - **Write assembly.** Drop a ready stub into your buffer that loads the number and argument registers, then traps.
 - **ElDoc.** Hover over `SYS_openat` in C or assembly and see its signature and number in the echo area.
+
+![The x64 list filtered down to the epoll syscalls](https://syscall.sh/emacs/filter.webp)
+
+![ElDoc showing the signature and number of SYS_openat in a C buffer](https://syscall.sh/emacs/eldoc.webp)
+
+There are more screenshots and a walkthrough at [syscall.sh/emacs](https://syscall.sh/emacs/).
 
 ## Requirements
 
@@ -143,6 +151,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) if you want to help out.
 ## Related
 
 - [syscall.sh](https://syscall.sh) is the same data as a website
+- [syscall.sh/emacs](https://syscall.sh/emacs/) shows this package in action
 - [api.syscall.sh](https://api.syscall.sh/docs) is the JSON API this package reads
 
 ## License
