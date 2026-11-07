@@ -1108,8 +1108,8 @@ With PREFIXED-ONLY, only symbols such as SYS_read or __NR_read count."
       (insert "\n"))))
 
 (defun syscall--show (arch syscall &optional kernel)
-  "Describe SYSCALL of ARCH in KERNEL in the *syscall* buffer."
-  (let ((buffer (get-buffer-create "*syscall*")))
+  "Describe SYSCALL of ARCH in KERNEL in a named buffer."
+  (let ((buffer (get-buffer-create (format "*syscall %s*" (alist-get 'name syscall)))))
     (with-current-buffer buffer
       (syscall-detail-mode)
       (setq syscall--arch arch

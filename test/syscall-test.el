@@ -419,7 +419,7 @@ ETAG is recorded; CALLBACK gets the canned response."
 (ert-deftest syscall-test-detail-buffer ()
   (syscall-test--with-data
     (syscall-lookup "x64" (syscall-find "x64" "read"))
-    (with-current-buffer "*syscall*"
+    (with-current-buffer "*syscall read*"
       (should (eq major-mode 'syscall-detail-mode))
       (let ((text (buffer-string)))
         (should (string-match-p "read(unsigned int fd, char \\*buf, size_t count)" text))
@@ -428,6 +428,7 @@ ETAG is recorded; CALLBACK gets the canned response."
         (should (string-match-p "arm64 +63 +0x3f" text))
         (should (string-match-p "or earlier" text)))
       (syscall-detail-next)
+      (should (equal (buffer-name) "*syscall newcall*"))
       (should (equal "newcall" (alist-get 'name syscall--entry)))
       (should-error (syscall-detail-next) :type 'user-error)
       (should-error (syscall-detail-kernel "3.6") :type 'user-error)
@@ -442,12 +443,14 @@ ETAG is recorded; CALLBACK gets the canned response."
       (should (equal "0x0" (current-kill 0)))
       (revert-buffer)
       (should (equal "read" (alist-get 'name syscall--entry)))
-      (kill-buffer))))
+      (kill-buffer)
+      (when-let* ((buffer (get-buffer "*syscall newcall*"))) (kill-buffer buffer))
+      (when-let* ((buffer (get-buffer "*syscall oldcall*"))) (kill-buffer buffer)))))
 
 (ert-deftest syscall-test-lookup-number ()
   (syscall-test--with-data
     (syscall-lookup-number "x64" 60)
-    (with-current-buffer "*syscall*"
+    (with-current-buffer "*syscall newcall*"
       (should (equal "newcall" (alist-get 'name syscall--entry)))
       (kill-buffer))
     (should-error (syscall-lookup-number "x64" 59) :type 'user-error)))
@@ -475,7 +478,7 @@ ETAG is recorded; CALLBACK gets the canned response."
       (syscall-list-family "")
       (should (= 3 (length tabulated-list-entries)))
       (syscall-list-describe)
-      (kill-buffer "*syscall*")
+      (kill-buffer "*syscall oldcall*")
       (kill-buffer))))
 
 (ert-deftest syscall-test-compare-and-conventions ()
