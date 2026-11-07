@@ -17,14 +17,12 @@
 ;; Look up Linux syscalls and calling conventions for every architecture
 ;; https://api.syscall.sh covers, without a network connection.
 ;;
-;; The first command that needs data offers to download it, about 6MB.
+;; A dataset is bundled for offline use.  `syscall-update' refreshes it.
 ;; Each architecture file holds every syscall it ever had, with `since'
 ;; and `removed_in', so any scanned kernel release works offline.
 ;;
-;; `syscall-update' refreshes the cache.  It sends the stored ETags, so
-;; files that did not change cost a 304 and nothing else.  Downloads go
-;; to a staging directory first and only replace the cache when every
-;; request worked, so a failed update never leaves you with half a cache.
+;; `syscall-update' checks the dataset hash before downloading.  It
+;; verifies fresh data before replacing the cached copy.
 ;;
 ;; Bind `syscall-command-map' to a key and start with `syscall-lookup'.
 
@@ -40,6 +38,9 @@
 (require 'button)
 (require 'eldoc)
 
+(defvar syscall-data--json)
+(defvar syscall-data--sha256)
+
 (defgroup syscall nil
   "Offline Linux syscall reference."
   :group 'tools
@@ -53,7 +54,7 @@
   "Directory holding the downloaded syscall data."
   :type 'directory)
 
-(defcustom syscall-auto-update-interval 30
+(defcustom syscall-auto-update-interval nil
   "Days after which cached data is refreshed in the background.
 The check runs at most once per session, the first time data is
 needed.  nil disables it; `syscall-update' still works."
@@ -132,11 +133,14 @@ needed.  nil disables it; `syscall-update' still works."
 META defaults to the metadata on disk."
   (let ((meta (or meta (syscall--read-meta))))
     (and meta
+         (not (plist-get meta :use-bundled))
          (plist-get meta :arches)
-         (file-exists-p (syscall--path "kernels.json"))
+         (or (and (plist-get meta :dataset-sha256)
+                  (file-exists-p (syscall--path "dataset.json")))
+             (and (file-exists-p (syscall--path "kernels.json"))
          (file-exists-p (syscall--path "conventions.json"))
          (cl-every (lambda (arch) (file-exists-p (syscall--path (syscall--arch-file arch))))
-                   (plist-get meta :arches)))))
+                   (plist-get meta :arches)))))))
 
 ;;;; HTTP
 
@@ -241,6 +245,7 @@ STATUS is the plist `url-retrieve' passes to its callback."
   (fetched 0)
   (unchanged 0)
   (last-request 0.0)
+  dataset-sha256 dataset-size
   force quiet callback timer buffer cancelled)
 
 (defvar syscall--job nil
@@ -320,7 +325,7 @@ STATUS is the plist `url-retrieve' passes to its callback."
                  (error (syscall--job-fail
                          job (format "%s: %s" url (error-message-string e)))))))))))
 
-(defun syscall--job-response (job res attempt url etag code new-etag body err)
+(cl-defun syscall--job-response (job res attempt url etag code new-etag body err)
   "Handle the answer to RES for JOB.
 ATTEMPT, URL and ETAG describe the request; CODE, NEW-ETAG, BODY and
 ERR the response, as passed by `syscall--http-get'."
@@ -331,8 +336,46 @@ ERR the response, as passed by `syscall--http-get'."
       (let ((data (condition-case nil
                       (syscall--parse-json (decode-coding-string body 'utf-8))
                     (error nil))))
-        (unless (syscall--valid-p kind data)
+        (unless (or (memq kind '(manifest dataset)) (syscall--valid-p kind data))
           (error "Response is empty or not in the expected format"))
+        (when (eq kind 'manifest)
+          (let* ((info (alist-get 'json data))
+                 (sha (alist-get 'sha256 info))
+                 (size (alist-get 'size_bytes info))
+                 (meta (syscall--read-meta))
+                 (cached-sha (and (syscall--cache-complete-p meta)
+                                  (equal (plist-get meta :source) syscall-api-url)
+                                  (plist-get meta :dataset-sha256)))
+                 (bundled-sha (when (and (not cached-sha)
+                                         (equal syscall-api-url "https://api.syscall.sh/v2")
+                                         (syscall--bundled-available-p))
+                                (require 'syscall-data)
+                                syscall-data--sha256))
+                 (local (or cached-sha bundled-sha)))
+            (unless (and (stringp sha) (string-match-p "\\`[a-f0-9]\\{64\\}\\'" sha)
+                         (integerp size) (> size 0))
+              (error "Invalid dataset manifest"))
+            (setf (syscall--job-dataset-sha256 job) sha
+                  (syscall--job-dataset-size job) size)
+            (if (and (not (syscall--job-force job)) (equal sha local))
+                (progn
+                  (when meta
+                    (when (and bundled-sha (syscall--cache-complete-p meta))
+                      (setq meta (plist-put meta :use-bundled t))
+                      (syscall--reset))
+                    (syscall--write-meta (plist-put meta :fetched-at (float-time))))
+                  (syscall--job-message job "data is up to date")
+                  (syscall--job-finish job t 0))
+              (setf (syscall--job-queue job)
+                    (list (syscall--resource 'dataset "/dataset/syscalls.json" "dataset.json")))
+              (syscall--job-next job)))
+          (cl-return-from syscall--job-response nil))
+        (when (eq kind 'dataset)
+          (unless (and (= (length body) (syscall--job-dataset-size job))
+                       (equal (secure-hash 'sha256 body) (syscall--job-dataset-sha256 job)))
+            (error "Dataset size or checksum does not match manifest"))
+          (setf (syscall--job-arches job)
+                (syscall--kernel-arches (alist-get 'kernels (syscall--convert-dataset data)))))
         (let ((dest (expand-file-name file (syscall--staging-dir)))
               (coding-system-for-write 'no-conversion))
           (make-directory (file-name-directory dest) t)
@@ -405,6 +448,7 @@ ERR the response, as passed by `syscall--http-get'."
         (syscall--write-meta (list :schema syscall--schema
                                    :fetched-at (float-time)
                                    :source syscall-api-url
+                                   :dataset-sha256 (syscall--job-dataset-sha256 job)
                                    :arches (syscall--job-arches job)
                                    :etags (syscall--job-etags job)))
         (syscall--reset)
@@ -427,8 +471,7 @@ files downloaded on success, the failure reason otherwise."
   (make-directory (syscall--staging-dir) t)
   (let* ((meta (syscall--read-meta))
          (job (syscall--job-create
-               :queue (list (syscall--resource 'kernels "/kernels" "kernels.json")
-                            (syscall--resource 'conventions "/conventions" "conventions.json"))
+               :queue (list (syscall--resource 'manifest "/dataset" "manifest.json"))
                :old-etags (plist-get meta :etags)
                :force force :quiet quiet :callback callback)))
     (setq syscall--job job)
@@ -451,8 +494,7 @@ Return non-nil on success.  \\[keyboard-quit] cancels the update."
 ;;;###autoload
 (defun syscall-update (&optional force)
   "Refresh the syscall cache from `syscall-api-url' in the background.
-With prefix argument FORCE, download every file again instead of
-asking the API whether it changed."
+With prefix argument FORCE, download the dataset even if it has not changed."
   (interactive "P")
   (syscall--start-update force)
   (message "syscall: update started"))
@@ -482,8 +524,10 @@ asking the API whether it changed."
   (interactive)
   (let ((meta (syscall--read-meta)))
     (if (not (syscall--cache-complete-p meta))
-        (message "syscall: no complete cache in %s, run M-x syscall-update"
-                 syscall-cache-directory)
+        (if (syscall--bundled-available-p)
+            (message "syscall: using bundled data")
+          (message "syscall: no complete cache in %s, run M-x syscall-update"
+                   syscall-cache-directory))
       (let ((kernels (syscall-kernels)))
         (message "syscall: %d architectures, kernels %s to %s, checked %s (%s)"
                  (length (plist-get meta :arches))
@@ -502,6 +546,54 @@ asking the API whether it changed."
     (setq syscall--auto-update-tried t)
     (syscall--start-update nil t nil)))
 
+(defun syscall--bundled-data ()
+  "Return the bundled dataset, parsed once."
+  (syscall--memo 'bundled
+                 (lambda ()
+                   (when (require 'syscall-data nil t)
+                     (syscall--parse-json
+                      (decode-coding-string
+                       (base64-decode-string syscall-data--json) 'utf-8))))))
+
+(defun syscall--convert-dataset (data)
+  "Convert and validate the full API DATA for offline lookup."
+  (let ((kernel-rows (alist-get 'kernels data))
+        (conventions (alist-get 'conventions data))
+        (rows (alist-get 'syscalls data))
+        (versions (make-hash-table :test #'equal))
+        (tables (make-hash-table :test #'equal)) kernels syscalls)
+    (unless (and (consp kernel-rows) (syscall--valid-p 'conventions conventions)
+                 (syscall--valid-p 'arch rows))
+      (error "Invalid dataset"))
+    (dolist (row kernel-rows)
+      (let ((version (alist-get 'version row)) (arch (alist-get 'arch row)))
+        (unless (and (stringp version) (stringp arch)) (error "Invalid kernel"))
+        (unless (gethash version versions) (push version kernels))
+        (puthash version (cons arch (gethash version versions)) versions)))
+    (dolist (row rows)
+      (let ((arch (alist-get 'arch row)))
+        (unless (stringp arch) (error "Invalid architecture"))
+        (puthash arch (cons row (gethash arch tables)) tables)))
+    (setq kernels
+          (mapcar (lambda (version)
+                    (cons (cons 'version version)
+                          (list (cons 'arches (nreverse (gethash version versions))))))
+                  (nreverse kernels)))
+    (dolist (arch (syscall--kernel-arches kernels))
+      (unless (gethash arch tables) (error "Missing architecture: %s" arch)))
+    (maphash (lambda (arch table) (push (cons (intern arch) (nreverse table)) syscalls)) tables)
+    `((kernels . ,kernels) (conventions . ,conventions) (syscalls . ,syscalls))))
+
+(defun syscall--cached-dataset ()
+  "Return the converted full dataset from the cache."
+  (syscall--memo 'dataset
+                 (lambda () (syscall--convert-dataset
+                             (syscall--read-json-file (syscall--path "dataset.json"))))))
+
+(defun syscall--bundled-available-p ()
+  "Return non-nil when the bundled dataset is available."
+  (or (featurep 'syscall-data) (locate-library "syscall-data")))
+
 (defun syscall-ensure-data ()
   "Make sure the cache is usable, offering to download it when missing.
 Signal a `user-error' when there is no data to work with."
@@ -509,6 +601,7 @@ Signal a `user-error' when there is no data to work with."
     (cond
      ((syscall--cache-complete-p meta)
       (syscall--maybe-auto-update meta))
+     ((syscall--bundled-available-p) t)
      ((and (not noninteractive)
            (y-or-n-p "Download the syscall data from api.syscall.sh (about 6MB)? "))
       (unless (syscall--update-sync)
@@ -532,7 +625,8 @@ Signal a `user-error' when there is no data to work with."
 (defun syscall--ready-p ()
   "Non-nil when the cache can be used without downloading anything."
   (or syscall--ready
-      (setq syscall--ready (and (syscall--cache-complete-p) t))))
+      (setq syscall--ready (and (or (syscall--cache-complete-p)
+                                   (syscall--bundled-available-p)) t))))
 
 (defun syscall--memo (key fn)
   "Value cached under KEY, computed by calling FN the first time."
@@ -543,11 +637,27 @@ Signal a `user-error' when there is no data to work with."
 
 (defun syscall--load (file)
   "Parsed contents of the cache-relative FILE, read once."
-  (syscall--memo file (lambda () (syscall--read-json-file (syscall--path file)))))
+  (syscall--memo
+   file (lambda ()
+          (if (and (syscall--cache-complete-p)
+                   (not (plist-get (syscall--read-meta) :dataset-sha256)))
+              (syscall--read-json-file (syscall--path file))
+            (let ((data (if (syscall--cache-complete-p)
+                            (syscall--cached-dataset)
+                          (syscall--bundled-data))))
+              (cond
+               ((equal file "kernels.json") (alist-get 'kernels data))
+               ((equal file "conventions.json") (alist-get 'conventions data))
+               ((string-match "\\`arch/\\(.+\\)\\.json\\'" file)
+                (alist-get (intern (match-string 1 file))
+                           (alist-get 'syscalls data)))))))))
 
 (defun syscall-arches ()
   "Architectures in the cache."
-  (syscall--memo 'arches (lambda () (plist-get (syscall--read-meta) :arches))))
+  (syscall--memo 'arches (lambda ()
+                          (if (syscall--cache-complete-p)
+                              (plist-get (syscall--read-meta) :arches)
+                            (syscall--kernel-arches (syscall-kernels))))))
 
 (defun syscall-kernels ()
   "Scanned kernel releases, oldest first, as alists of version and arches."

@@ -2,7 +2,7 @@
 
 Linux syscall tables right inside Emacs, and they work offline.
 
-Look up any syscall on several architectures and ABIs, for almost every kernel release. You get the number, the signature, which register holds each argument, and when it showed up or went away. The data comes from [api.syscall.sh](https://api.syscall.sh/docs) and gets cached the first time you need it, so after that you can work on a plane.
+Look up any syscall on several architectures and ABIs, for almost every kernel release. You get the number, the signature, which register holds each argument, and when it showed up or went away. The package includes data from [api.syscall.sh](https://api.syscall.sh/docs), so it works offline right away.
 
 ![The detail buffer for openat on x64, with its number, signature, registers, notes and its number on other architectures](https://syscall.sh/emacs/detail.webp)
 
@@ -65,7 +65,7 @@ Or clone it anywhere and load it yourself:
 
 ## Quick start
 
-Press `C-c s l` and type a syscall name. The first time, it asks to download the data (about 6MB, takes around 10 seconds). After that everything comes from the cache.
+Press `C-c s l` and type a syscall name. The bundled data works offline. Run `M-x syscall-update` when you want fresh data.
 
 | Key | Command | What it does |
 | --- | --- | --- |
@@ -112,25 +112,23 @@ Run `M-x customize-group RET syscall RET` for everything. The ones you probably 
 ```elisp
 (setq syscall-default-arch "arm64"          ; default is "x64"
       syscall-default-kernel nil            ; nil for latest, "all", or a release like "5.10"
-      syscall-auto-update-interval 30       ; days between background refreshes, nil to turn off
+      syscall-auto-update-interval nil      ; set days between background refreshes, or nil
       syscall-eldoc-bare-names nil)         ; t to also match plain words like read
 ```
 
-The cache lives in `~/.emacs.d/syscall/` by default. Change `syscall-cache-directory` to put it somewhere else.
+Updates live in `~/.emacs.d/syscall/` by default. Change `syscall-cache-directory` to put them somewhere else. Clearing the cache restores the bundled data.
 
 ## How the cache works
 
 Each architecture is one JSON file with every syscall it ever had, plus the release it appeared in and the one it was removed in. A syscall exists in a release when it showed up at or before it and was not removed yet. That single rule covers every release offline, and the results match what the API itself returns.
 
 A few more details:
-- **Updates are cheap.** `syscall-update` sends the stored ETags, so files that didn't change come back as a 304 with no download. Use `C-u M-x syscall-update` to grab everything again.
-- **The API stays happy.** Requests go one at a time with a short pause between them, and rate limits or server errors get retried a few times.
-- **Updates can't break your cache.** New files land in a staging folder and only replace the old ones once every request worked. Bad JSON or an empty architecture cancels the whole update.
-- **Nothing phones home behind your back.** Only `syscall-update` and the monthly background refresh touch the network. ElDoc never downloads anything, and it stays quiet until the cache exists.
+- **Updates are cheap.** `syscall-update` checks the dataset hash first. It downloads fresh data only when the hash changes. Use `C-u M-x syscall-update` to download it again.
+- **Updates retry.** Requests go one at a time. Rate limits and server errors get retried a few times.
+- **Updates protect your cache.** The package checks the size, hash and contents before saving the new data. A failed update keeps the old cache.
+- **Nothing phones home behind your back.** Only `syscall-update` and an optional background refresh touch the network. ElDoc uses the available offline data.
 
 Other handy commands are `syscall-cache-info`, `syscall-cancel-update` and `syscall-clear-cache`.
-
-One thing worth knowing: url.el normally answers a 304 by reading its own disk cache. syscall.el keeps its own cache, so it advises `url-cache-extract` to skip that step for its own requests only.
 
 ## Troubleshooting
 
@@ -143,6 +141,8 @@ One thing worth knowing: url.el normally answers a 304 by reading its own disk c
 ```sh
 make compile test
 ```
+
+Run `make dataset` to refresh the bundled data from the full JSON dataset. This needs Python 3 and curl. The generated `syscall-data.el` is committed so normal builds need no network.
 
 The suite fakes the API, so it needs no network. `make live` runs two real updates against api.syscall.sh into a throwaway cache. CI runs on Emacs 29.4, 30.2 and 31.1.
 

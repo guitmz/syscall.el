@@ -30,6 +30,9 @@ The last response repeats.  A CODE of nil simulates a network error.")
 (defvar syscall-test--requests nil
   "Requests seen, newest first, as (ENDPOINT . IF-NONE-MATCH).")
 
+(defvar syscall-test--legacy-update t
+  "Use the legacy update fixtures when non-nil.")
+
 (defun syscall-test--fake-get (url etag callback)
   "Answer URL from `syscall-test--server', asynchronously like url.el.
 ETAG is recorded; CALLBACK gets the canned response."
@@ -66,9 +69,19 @@ ETAG is recorded; CALLBACK gets the canned response."
            (syscall-test--server (syscall-test--ok-server))
            (syscall--job nil))
        (syscall--reset)
-       (cl-letf (((symbol-function 'syscall--http-get) #'syscall-test--fake-get))
+       (let ((next (symbol-function 'syscall--job-next)))
+       (cl-letf (((symbol-function 'syscall--http-get) #'syscall-test--fake-get)
+                 ((symbol-function 'syscall--job-next)
+                  (lambda (job)
+                    (when (and syscall-test--legacy-update
+                               (eq (plist-get (car (syscall--job-queue job)) :kind) 'manifest))
+                      (setf (syscall--job-queue job)
+                            (list (syscall--resource 'kernels "/kernels" "kernels.json")
+                                  (syscall--resource 'conventions "/conventions" "conventions.json"))))
+                    (funcall next job)))
+                 ((symbol-function 'syscall--bundled-available-p) (lambda () nil)))
          (unwind-protect (progn ,@body)
-           (syscall--reset))))))
+           (syscall--reset)))))))
 
 (defun syscall-test--update (&optional force)
   "Run an update to the end, returning (OK RESULT)."
@@ -83,6 +96,62 @@ ETAG is recorded; CALLBACK gets the canned response."
   (with-temp-buffer
     (insert-file-contents (syscall--path file))
     (buffer-string)))
+
+(ert-deftest syscall-test-bundled-data ()
+  (ert-with-temp-directory syscall-cache-directory
+    (let ((syscall-auto-update-interval nil))
+      (syscall--reset)
+      (unwind-protect
+          (progn
+            (should (syscall--ready-p))
+            (should (syscall-ensure-data))
+            (should (member "x64" (syscall-arches)))
+            (should (syscall-find "x64" "read"))
+            (should (syscall-conventions)))
+        (syscall--reset)))))
+
+(ert-deftest syscall-test-dataset-manifest ()
+  (syscall-test--with-cache
+    (let* ((syscall-test--legacy-update nil)
+           (dataset (concat "{\"kernels\":[{\"version\":\"3.3\",\"arch\":\"x64\"}],"
+                            "\"conventions\":" syscall-test--conventions
+                            ",\"syscalls\":" syscall-test--x64 "}"))
+           (hash (secure-hash 'sha256 dataset))
+           (manifest (format "{\"json\":{\"size_bytes\":%d,\"sha256\":\"%s\"}}"
+                             (length dataset) hash)))
+      (setq syscall-test--server
+            (list (list "/dataset" (list 200 nil manifest))
+                  (list "/dataset/syscalls.json" (list 200 nil dataset))))
+      (should (equal (syscall-test--update) '(t 1)))
+      (should (equal hash (plist-get (syscall--read-meta) :dataset-sha256)))
+      (should (equal "read" (alist-get 'name (car (syscall-arch-syscalls "x64")))))
+      (setq syscall-test--requests nil)
+      (should (equal (syscall-test--update) '(t 0)))
+      (should (equal (mapcar #'car syscall-test--requests) '("/dataset")))
+      (setq syscall-test--requests nil)
+      (should (equal (syscall-test--update t) '(t 1)))
+      (should (= 2 (length syscall-test--requests)))
+      (setf (cadr (assoc "/dataset/syscalls.json" syscall-test--server))
+            '(200 nil "bad"))
+      (should-not (car (syscall-test--update t)))
+      (should (equal hash (plist-get (syscall--read-meta) :dataset-sha256))))))
+
+(ert-deftest syscall-test-matching-bundle-replaces-legacy-cache ()
+  (syscall-test--with-cache
+    (syscall-test--update)
+    (should (syscall--cache-complete-p))
+    (let* ((syscall-test--legacy-update nil)
+           (syscall-api-url "https://api.syscall.sh/v2")
+           (manifest (format "{\"json\":{\"size_bytes\":1,\"sha256\":\"%s\"}}"
+                             (progn (require 'syscall-data) syscall-data--sha256))))
+      (setq syscall-test--requests nil
+            syscall-test--server (list (list "/dataset" (list 200 nil manifest))))
+      (cl-letf (((symbol-function 'syscall--bundled-available-p) (lambda () t)))
+        (should (equal (syscall-test--update) '(t 0)))
+        (should (equal (mapcar #'car syscall-test--requests) '("/dataset")))
+        (should (plist-get (syscall--read-meta) :use-bundled))
+        (should-not (syscall--cache-complete-p))
+        (should (syscall-find "x64" "read"))))))
 
 (ert-deftest syscall-test-first-update ()
   (syscall-test--with-cache

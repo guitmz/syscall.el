@@ -1,9 +1,15 @@
 EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch -L .
 
-.PHONY: all compile test lint live clean
+.PHONY: all compile test lint live dataset clean
 
 all: compile test
+
+# Refresh the committed dataset explicitly, without making normal builds network dependent.
+dataset:
+	@set -e; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	  curl -fsSL https://api.syscall.sh/v2/dataset/syscalls.json -o "$$tmp"; \
+	  python3 scripts/build-dataset.py "$$tmp" syscall-data.el
 
 compile:
 	$(BATCH) --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile syscall.el

@@ -5,6 +5,7 @@ Thanks for helping out. Keep changes small, keep Emacs 29.1 support, and please 
 ## Running things
 
 ```sh
+make dataset   # refresh the bundled data from the API
 make compile   # byte compile, warnings fail the build
 make test      # ERT suite, no network needed
 make lint      # checkdoc and package-lint
