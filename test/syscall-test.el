@@ -106,6 +106,9 @@ ETAG is recorded; CALLBACK gets the canned response."
             (should (syscall--ready-p))
             (should (syscall-ensure-data))
             (should (member "x64" (syscall-arches)))
+            (should (member "ia64" (syscall-arches)))
+            (should (equal (syscall--resolve-kernel "ia64" nil) "6.6"))
+            (should (equal (alist-get 'until (syscall-convention "ia64")) "6.7"))
             (should (syscall-find "x64" "read"))
             (should (syscall-conventions)))
         (syscall--reset)))))
@@ -490,6 +493,11 @@ ETAG is recorded; CALLBACK gets the canned response."
     (syscall-compare "newcall")
     (with-current-buffer "*syscall compare newcall*"
       (should (string-match-p "missing on arm64" (buffer-string)))
+      (kill-buffer))
+    (syscall-compare "oldcall" "all")
+    (with-current-buffer "*syscall compare oldcall*"
+      (should (equal '("x64") (mapcar #'caar tabulated-list-entries)))
+      (should (string-match-p "all releases" mode-line-process))
       (kill-buffer))
     (syscall-conventions-table)
     (with-current-buffer "*syscall conventions*"

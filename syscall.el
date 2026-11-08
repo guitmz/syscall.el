@@ -709,16 +709,27 @@ every syscall the architecture ever had, and a version such as
     ("mipso32" "MIPS o32 ABI" 13)
     ("alpha" "DEC Alpha" 100)
     ("arc" "Synopsys ARC" 100)
+    ("blackfin" "Analog Devices Blackfin" 100)
+    ("cris" "Axis CRIS" 100)
     ("csky" "C-SKY" 100)
+    ("frv" "Fujitsu FR-V" 100)
     ("hexagon" "Qualcomm Hexagon" 100)
+    ("ia64" "Intel Itanium" 100)
+    ("m32r" "Renesas M32R" 100)
     ("m68k" "Motorola 68000" 100)
+    ("metag" "Imagination Meta" 100)
     ("microblaze" "Xilinx MicroBlaze" 100)
+    ("mn10300" "Panasonic MN10300" 100)
+    ("nds32" "Andes NDS32" 100)
     ("nios2" "Intel Nios II" 100)
     ("openrisc" "OpenRISC" 100)
     ("parisc" "HP PA-RISC" 100)
+    ("score" "Sunplus S+core" 100)
     ("sh" "SuperH" 100)
     ("sparc" "SPARC, 32 bit" 100)
     ("sparc64" "SPARC, 64 bit" 100)
+    ("tilegx" "Tilera TILE Gx" 100)
+    ("tilepro" "Tilera TILEPro" 100)
     ("xtensa" "Tensilica Xtensa" 100))
   "How architectures are shown, as in syscall.sh.
 Each element is (ARCH TITLE RANK . NOTES).  Architectures sort by
@@ -1092,6 +1103,8 @@ With PREFIXED-ONLY, only symbols such as SYS_read or __NR_read count."
     (syscall--field "kconfig" (alist-get 'kconfig sc))
     (syscall--field "family" (alist-get 'family sc))
     (syscall--field "showing" (syscall--kernel-label arch kernel))
+    (when-let* ((until (alist-get 'until (syscall-convention arch))))
+      (syscall--field "arch removed in" (format "Linux %s" until) 'syscall-removed))
     (syscall--insert-registers arch sc)
     (when notes
       (syscall--heading "Notes")
@@ -1545,8 +1558,7 @@ part of the row.  The list updates while typing."
           (list (alist-get 'name (syscall--read-syscall
                                   (syscall--arch-arg current-prefix-arg) syscall-default-kernel))
                 syscall-default-kernel)))
-  (let* ((kernel (if (equal kernel "all") nil kernel))
-         (buffer (get-buffer-create (format "*syscall compare %s*" name)))
+  (let* ((buffer (get-buffer-create (format "*syscall compare %s*" name)))
          missing entries)
     (dolist (arch (syscall--sorted-arches))
       (if-let* ((sc (syscall-find arch name kernel)))
@@ -1563,7 +1575,9 @@ part of the row.  The list updates while typing."
       (setq syscall--kernel kernel
             tabulated-list-entries (nreverse entries)
             mode-line-process (format " %s, %s" name
-                                      (if kernel (format "Linux %s" kernel) "latest")))
+                                      (cond ((equal kernel "all") "all releases")
+                                            (kernel (format "Linux %s" kernel))
+                                            (t "latest"))))
       (tabulated-list-print)
       (when missing
         (let ((inhibit-read-only t))
