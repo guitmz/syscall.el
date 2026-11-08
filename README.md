@@ -120,7 +120,7 @@ Updates live in `~/.emacs.d/syscall/` by default. Change `syscall-cache-director
 
 ## How the cache works
 
-Each architecture is one JSON file with every syscall it ever had, plus the release it appeared in and the one it was removed in. A syscall exists in a release when it showed up at or before it and was not removed yet. That single rule covers every release offline, and the results match what the API itself returns.
+The dataset records when each syscall appeared and when it was removed. The default is the latest scanned release for each architecture. For removed architectures, the detail buffer also shows when Linux removed them.
 
 A few more details:
 - **Updates are cheap.** `syscall-update` checks the dataset hash first. It downloads fresh data only when the hash changes. Use `C-u M-x syscall-update` to download it again.
