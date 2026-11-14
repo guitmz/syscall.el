@@ -1,5 +1,7 @@
 # syscall.el
 
+[![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-guitmz-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/guitmz)
+
 Linux syscall tables right inside Emacs, and they work offline.
 
 Look up any syscall on several architectures and ABIs, for almost every kernel release. You get the number, the signature, which register holds each argument, and when it showed up or went away. The package includes data from [api.syscall.sh](https://api.syscall.sh/docs), so it works offline right away.
