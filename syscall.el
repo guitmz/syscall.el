@@ -86,7 +86,11 @@ needed.  nil disables it; `syscall-update' still works."
 
 (defun syscall--path (file)
   "Absolute path of FILE inside `syscall-cache-directory'."
-  (expand-file-name file syscall-cache-directory))
+  (let* ((meta (unless (equal file "meta.eld") (syscall--read-meta)))
+         (directory (plist-get meta :directory)))
+    (expand-file-name file (if directory
+                               (expand-file-name directory syscall-cache-directory)
+                             syscall-cache-directory))))
 
 (defun syscall--arch-file (arch)
   "Cache file, relative to the cache directory, of ARCH's syscalls."
@@ -111,10 +115,15 @@ needed.  nil disables it; `syscall-update' still works."
   (let ((print-length nil)
         (print-level nil)
         (coding-system-for-write 'utf-8-unix))
-    (with-temp-file (syscall--path "meta.eld")
-      (insert ";;; syscall.el cache metadata. Generated, do not edit.\n")
-      (prin1 meta (current-buffer))
-      (insert "\n"))))
+    (let ((temp (make-temp-file (expand-file-name ".meta-" syscall-cache-directory))))
+      (unwind-protect
+          (progn
+            (with-temp-file temp
+              (insert ";;; syscall.el cache metadata. Generated, do not edit.\n")
+              (prin1 meta (current-buffer))
+              (insert "\n"))
+            (rename-file temp (syscall--path "meta.eld") t))
+        (when (file-exists-p temp) (delete-file temp))))))
 
 (defun syscall--parse-json (string)
   "Parse the JSON in STRING.  Objects become alists, arrays lists, null nil."
@@ -245,7 +254,7 @@ STATUS is the plist `url-retrieve' passes to its callback."
   (fetched 0)
   (unchanged 0)
   (last-request 0.0)
-  dataset-sha256 dataset-size
+  dataset-sha256 dataset-size directory base-directory committed
   force quiet callback timer buffer cancelled)
 
 (defvar syscall--job nil
@@ -254,9 +263,10 @@ STATUS is the plist `url-retrieve' passes to its callback."
 (defvar syscall--auto-update-tried nil
   "Non-nil once this session started an automatic update.")
 
-(defun syscall--staging-dir ()
-  "Directory where a running update writes its downloads."
-  (syscall--path ".staging/"))
+(defun syscall--staging-dir (&optional job)
+  "Directory where JOB writes its downloads."
+  (and (or job syscall--job)
+       (syscall--job-directory (or job syscall--job))))
 
 (defun syscall--resource (kind endpoint file)
   "A request of KIND for ENDPOINT, saved to the cache-relative FILE."
@@ -309,7 +319,7 @@ STATUS is the plist `url-retrieve' passes to its callback."
   (setf (syscall--job-last-request job) (float-time))
   (let* ((file (plist-get res :file))
          (etag (and (not (syscall--job-force job))
-                    (file-exists-p (syscall--path file))
+                    (file-exists-p (expand-file-name file (syscall--job-base-directory job)))
                     (cdr (assoc file (syscall--job-old-etags job)))))
          (url (concat (string-trim-right syscall-api-url "/+") (plist-get res :endpoint))))
     (syscall--job-message job "fetching %s%s..." file
@@ -359,6 +369,8 @@ ERR the response, as passed by `syscall--http-get'."
                   (syscall--job-dataset-size job) size)
             (if (and (not (syscall--job-force job)) (equal sha local))
                 (progn
+                  (when bundled-sha
+                    (unless meta (setq meta (list :schema syscall--schema :use-bundled t))))
                   (when meta
                     (when (and bundled-sha (syscall--cache-complete-p meta))
                       (setq meta (plist-put meta :use-bundled t))
@@ -376,7 +388,7 @@ ERR the response, as passed by `syscall--http-get'."
             (error "Dataset size or checksum does not match manifest"))
           (setf (syscall--job-arches job)
                 (syscall--kernel-arches (alist-get 'kernels (syscall--convert-dataset data)))))
-        (let ((dest (expand-file-name file (syscall--staging-dir)))
+        (let ((dest (expand-file-name file (syscall--staging-dir job)))
               (coding-system-for-write 'no-conversion))
           (make-directory (file-name-directory dest) t)
           (write-region body nil dest nil 'silent))
@@ -389,7 +401,7 @@ ERR the response, as passed by `syscall--http-get'."
       (cl-incf (syscall--job-unchanged job))
       (syscall--job-after job kind
                           (and (eq kind 'kernels)
-                               (syscall--read-json-file (syscall--path file)))))
+                               (syscall--read-json-file (expand-file-name file (syscall--job-base-directory job))))))
      ((and (< attempt syscall-max-attempts)
            (or (null code) (eql code 429) (>= code 500)))
       (syscall--job-schedule job (* syscall-retry-delay attempt)
@@ -425,8 +437,9 @@ ERR the response, as passed by `syscall--http-get'."
   (setf (syscall--job-cancelled job) t)
   (when (syscall--job-timer job) (cancel-timer (syscall--job-timer job)))
   (syscall--kill-url-buffer (syscall--job-buffer job))
-  (when (file-directory-p (syscall--staging-dir))
-    (delete-directory (syscall--staging-dir) t))
+  (when (and (not (syscall--job-committed job))
+             (file-directory-p (syscall--staging-dir job)))
+    (delete-directory (syscall--staging-dir job) t))
   (when (eq syscall--job job) (setq syscall--job nil))
   (when (syscall--job-callback job)
     (funcall (syscall--job-callback job) ok result)))
@@ -441,16 +454,21 @@ ERR the response, as passed by `syscall--http-get'."
   "Move JOB's downloads into the cache and record the new metadata."
   (condition-case e
       (progn
-        (dolist (file (syscall--job-staged job))
-          (let ((dest (syscall--path file)))
-            (make-directory (file-name-directory dest) t)
-            (rename-file (expand-file-name file (syscall--staging-dir)) dest t)))
+        (dolist (entry (syscall--job-etags job))
+          (let* ((file (car entry))
+                 (dest (expand-file-name file (syscall--staging-dir job))))
+            (unless (file-exists-p dest)
+              (make-directory (file-name-directory dest) t)
+              (copy-file (expand-file-name file (syscall--job-base-directory job)) dest))))
         (syscall--write-meta (list :schema syscall--schema
                                    :fetched-at (float-time)
                                    :source syscall-api-url
+                                   :directory (file-name-nondirectory
+                                               (directory-file-name (syscall--staging-dir job)))
                                    :dataset-sha256 (syscall--job-dataset-sha256 job)
                                    :arches (syscall--job-arches job)
                                    :etags (syscall--job-etags job)))
+        (setf (syscall--job-committed job) t)
         (syscall--reset)
         (unless (syscall--job-quiet job)
           (message "syscall: %d architectures, %d files updated, %d unchanged"
@@ -466,13 +484,15 @@ called with (OK RESULT) when the update ends: RESULT is the number of
 files downloaded on success, the failure reason otherwise."
   (when syscall--job
     (user-error "A syscall update is already running"))
-  (when (file-directory-p (syscall--staging-dir))
-    (delete-directory (syscall--staging-dir) t))
-  (make-directory (syscall--staging-dir) t)
+  (make-directory syscall-cache-directory t)
   (let* ((meta (syscall--read-meta))
          (job (syscall--job-create
                :queue (list (syscall--resource 'manifest "/dataset" "manifest.json"))
                :old-etags (plist-get meta :etags)
+               :base-directory (if (plist-get meta :directory)
+                                   (expand-file-name (plist-get meta :directory) syscall-cache-directory)
+                                 syscall-cache-directory)
+               :directory (make-temp-file (expand-file-name ".generation-" syscall-cache-directory) t)
                :force force :quiet quiet :callback callback)))
     (setq syscall--job job)
     (syscall--job-next job)
@@ -601,7 +621,7 @@ Signal a `user-error' when there is no data to work with."
     (cond
      ((syscall--cache-complete-p meta)
       (syscall--maybe-auto-update meta))
-     ((syscall--bundled-available-p) t)
+     ((syscall--bundled-available-p) (syscall--maybe-auto-update meta))
      ((and (not noninteractive)
            (y-or-n-p "Download the syscall data from api.syscall.sh (about 6MB)? "))
       (unless (syscall--update-sync)
@@ -1659,7 +1679,8 @@ when present, loads values that `syscall--arm-immediate-p' rejects."
     ((or "x64" "x86" "x32" "ia32") '(:mov "mov %s, %s" :comment ";"))
     ("arm" '(:mov "mov %s, #%s" :wide "ldr %s, =%s" :comment "@"))
     ("arm64" '(:mov "mov %s, #%s" :comment "//"))
-    ((or "riscv64" "mips64" "mipsn32" "mipso32") '(:mov "li %s, %s" :comment "#"))
+    ("riscv64" '(:mov "li %s, %s" :comment "#"))
+    ((or "mips64" "mipsn32" "mipso32") '(:mov "li $%s, %s" :comment "#"))
     (_ '(:mov nil :comment "#"))))
 
 (defun syscall--arm-immediate-p (n)
@@ -1690,9 +1711,12 @@ comments only."
                                     (not (syscall--arm-immediate-p value)))
                                (plist-get style :wide)
                              mov)))
-                  (push (cons (if fmt
+                  (push (cons (if (and (equal arch "mipso32")
+                                     (string-match "\\`sp[+]\\([0-9]+\\)\\'" reg))
+                                  (format "sw $zero, %s($sp)" (match-string 1 reg))
+                                (if fmt
                                   (format fmt reg text)
-                                (format "%s %s = %s" comment reg text))
+                                (format "%s %s = %s" comment reg text)))
                               note)
                         lines))))
       (line nr-reg nr (syscall--hex nr) (alist-get 'name syscall))

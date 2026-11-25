@@ -118,7 +118,7 @@ Run `M-x customize-group RET syscall RET` for everything. The ones you probably 
       syscall-eldoc-bare-names nil)         ; t to also match plain words like read
 ```
 
-Updates live in `~/.emacs.d/syscall/` by default. Change `syscall-cache-directory` to put them somewhere else. Clearing the cache restores the bundled data.
+Updates live in `~/.emacs.d/syscall/` by default. Change `syscall-cache-directory` to put them somewhere else. Clearing the cache restores the bundled data and removes older downloaded generations, which are retained so other Emacs sessions can finish using them.
 
 ## How the cache works
 

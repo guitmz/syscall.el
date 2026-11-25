@@ -166,7 +166,7 @@ ETAG is recorded; CALLBACK gets the canned response."
     (should (null (alist-get 'removed_in (car (syscall-arch-syscalls "x64")))))
     (should (equal (cdr (assoc "arch/arm64.json" (plist-get (syscall--read-meta) :etags)))
                    "\"a1\""))
-    (should-not (file-exists-p (syscall--staging-dir)))
+    (should-not syscall--job)
     (should (cl-every (lambda (r) (null (cdr r))) syscall-test--requests))))
 
 (ert-deftest syscall-test-not-modified ()
@@ -216,7 +216,7 @@ ETAG is recorded; CALLBACK gets the canned response."
                              :key #'car :test #'equal)))
       (should (equal (syscall--read-meta) meta))
       (should (equal (syscall-test--file "kernels.json") syscall-test--kernels))
-      (should-not (file-exists-p (syscall--staging-dir)))
+      (should-not syscall--job)
       (should-not syscall--job))))
 
 (ert-deftest syscall-test-client-error-not-retried ()
@@ -524,6 +524,60 @@ ETAG is recorded; CALLBACK gets the canned response."
       (goto-char (point-min))
       (should-not (syscall-eldoc-function))
       (should-not syscall--job))))
+
+(ert-deftest syscall-test-commit-failure-preserves-cache ()
+  (syscall-test--with-cache
+    (syscall-test--update)
+    (let ((meta (syscall--read-meta))
+          (old (syscall-test--file "arch/x64.json")))
+      (cl-letf (((symbol-function 'syscall--write-meta)
+                 (lambda (_) (error "simulated write failure"))))
+        (should-not (car (syscall-test--update t))))
+      (should (equal meta (syscall--read-meta)))
+      (should (equal old (syscall-test--file "arch/x64.json"))))))
+
+(ert-deftest syscall-test-separate-update-generations ()
+  (syscall-test--with-cache
+    (let* ((first (syscall--start-update nil t nil))
+           (syscall--job nil)
+           (second (syscall--start-update nil t nil))
+           (first-dir (syscall--staging-dir first))
+           (second-dir (syscall--staging-dir second)))
+      (should-not (equal first-dir second-dir))
+      (syscall--job-fail second "cancelled")
+      (should (file-directory-p first-dir))
+      (should-not (file-exists-p second-dir))
+      (syscall--job-fail first "cancelled"))))
+
+(ert-deftest syscall-test-bundled-auto-update ()
+  (syscall-test--with-cache
+    (let ((syscall--auto-update-tried nil)
+          (syscall-auto-update-interval 30))
+      (cl-letf (((symbol-function 'syscall--bundled-available-p) (lambda () t)))
+        (syscall-ensure-data)
+        (should syscall--job)
+        (syscall-cancel-update)))))
+
+(ert-deftest syscall-test-matching-bundle-records-check ()
+  (syscall-test--with-cache
+    (let* ((syscall-test--legacy-update nil)
+           (syscall-api-url "https://api.syscall.sh/v2")
+           (manifest (format "{\"json\":{\"size_bytes\":1,\"sha256\":\"%s\"}}"
+                             (progn (require 'syscall-data) syscall-data--sha256))))
+      (setq syscall-test--server (list (list "/dataset" (list 200 nil manifest))))
+      (cl-letf (((symbol-function 'syscall--bundled-available-p) (lambda () t)))
+        (should (equal (syscall-test--update) '(t 0)))
+        (should (plist-get (syscall--read-meta) :use-bundled))
+        (should (numberp (plist-get (syscall--read-meta) :fetched-at)))))))
+
+(ert-deftest syscall-test-mipso32-stack-arguments ()
+  (let ((conv '((arch . "mipso32") (instruction . "syscall") (nr . "v0")
+                (arg0 . "a0") (arg1 . "a1") (arg2 . "a2") (arg3 . "a3")
+                (arg4 . "sp+16") (arg5 . "sp+20"))))
+    (cl-letf (((symbol-function 'syscall-convention) (lambda (_) conv)))
+      (let ((stub (syscall-asm-stub "mipso32" '((name . "mmap") (nr . 4090) (nargs . 6)))))
+        (should (string-match-p (regexp-quote "sw $zero, 16($sp)") stub))
+        (should (string-match-p (regexp-quote "sw $zero, 20($sp)") stub))))))
 
 (provide 'syscall-test)
 ;;; syscall-test.el ends here
