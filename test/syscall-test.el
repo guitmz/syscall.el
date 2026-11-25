@@ -308,6 +308,25 @@ ETAG is recorded; CALLBACK gets the canned response."
     (should (equal (syscall-test--names (syscall-table "arm64")) '("read")))
     (should (eq (syscall-table "x64") (syscall-table "x64" "7.3")))))
 
+(ert-deftest syscall-test-bundled-missing-release ()
+  (ert-with-temp-directory syscall-cache-directory
+    (syscall--reset)
+    (unwind-protect
+        (dolist (arch '("csky" "hexagon"))
+          (should (syscall-find arch "sync_file_range" "6.9"))
+          (should-not (syscall-find arch "sync_file_range" "6.10"))
+          (should-not (equal "sync_file_range"
+                             (alist-get 'name (syscall-find-number arch 84 "6.10"))))
+          (should (syscall-find arch "sync_file_range" "6.11"))
+          (should (syscall-find arch "sync_file_range" "all"))
+          (pcase-let ((`(,added . ,removed) (syscall-diff-entries arch "6.9" "6.10")))
+            (should-not (member "sync_file_range" (syscall-test--names added)))
+            (should (member "sync_file_range" (syscall-test--names removed))))
+          (pcase-let ((`(,added . ,removed) (syscall-diff-entries arch "6.10" "6.11")))
+            (should (member "sync_file_range" (syscall-test--names added)))
+            (should-not (member "sync_file_range" (syscall-test--names removed)))))
+      (syscall--reset))))
+
 (ert-deftest syscall-test-find ()
   (syscall-test--with-data
     (should (= 63 (alist-get 'nr (syscall-find "arm64" "read"))))

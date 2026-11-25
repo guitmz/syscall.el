@@ -777,8 +777,10 @@ Architectures missing here show their own name and sort last.")
 
 (defun syscall-exists-in-p (syscall version)
   "Non-nil when SYSCALL is present in the release VERSION, a number.
-This is the rule syscall.sh uses: since <= VERSION < removed_in."
+VERSION must be within the syscall lifetime and absent from `missing_in'."
   (and (<= (syscall--version (alist-get 'since syscall)) version)
+       (not (cl-some (lambda (v) (= (syscall--version v) version))
+                     (alist-get 'missing_in syscall)))
        (let ((removed (alist-get 'removed_in syscall)))
          (or (null removed) (> (syscall--version removed) version)))))
 
